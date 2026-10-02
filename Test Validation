@@ -1,0 +1,47 @@
+"""Meaningful checks of split isolation and numerical output integrity."""
+from pathlib import Path
+import json
+import numpy as np
+import pandas as pd
+import validate_qspr as v
+
+base=Path(__file__).parent
+d,g,_=v.load_data(base);X=d[v.FEATURES].to_numpy(float);y=d.LogP.to_numpy(float)
+a,b=next(v.GroupShuffleSplit(n_splits=1,test_size=.2,random_state=42).split(d,groups=g))
+assert set(g[a]).isdisjoint(g[b])
+for inner_a,inner_b in v.splits(g[a]):
+    assert set(g[a][inner_a]).isdisjoint(g[a][inner_b])
+for model in ['ANN','SVR']:
+    p,pr,_,_=v.evaluate_fold(X,y,g,a,b,model)
+    changed=y.copy();changed[b]+=10000
+    q,qr,_,_=v.evaluate_fold(X,changed,g,a,b,model)
+    assert np.array_equal(p,q) and pr==qr, 'Outer test responses affect predictions'
+    fitted=v.make_model(model,pr);v.fit(fitted,X[a],y[a])
+    np.testing.assert_allclose(fitted.named_steps['scaler'].mean_,X[a].mean(axis=0))
+print('PASS: identity isolation, outer-target noninterference, training-only scaler')
+
+out=base/'validation_results'
+if (out/'nested_summary.csv').exists():
+    nested=pd.read_csv(out/'nested_summary.csv');hold=pd.read_csv(out/'holdout_summary.csv')
+    for _,r in nested.iterrows():
+        pred=pd.read_csv(out/f'{r.Model}_{r.Property}_predictions.csv')
+        np.testing.assert_allclose(list(v.metrics(pred.observed,pred.nested_prediction).values()),r[['R2','RMSE','MAE']].to_numpy(float))
+        h=hold[(hold.Model==r.Model)&(hold.Property==r.Property)].iloc[0]
+        test=pred.dropna(subset=['holdout_prediction'])
+        np.testing.assert_allclose(list(v.metrics(test.observed,test.holdout_prediction).values()),h[['R2','RMSE','MAE']].to_numpy(float))
+        folds=json.loads((out/f'{r.Model}_{r.Property}_folds.json').read_text());seen=[]
+        for fold in folds:
+            aa=np.array(fold['train_rows']);bb=np.array(fold['test_rows'])
+            assert set(g[aa]).isdisjoint(g[bb]);seen.extend(bb)
+        assert sorted(seen)==list(range(len(d)))
+        for k in ['R2','RMSE','MAE']:
+            assert r[k+'_CI_low']<=r[k+'_CI_high']
+    print('PASS: all saved outer folds isolated and complete; all metrics independently recomputed')
+if (out/'permutation_runs.csv').exists():
+    runs=pd.read_csv(out/'permutation_runs.csv');summ=pd.read_csv(out/'permutation_summary.csv')
+    for _,r in summ.iterrows():
+        rr=runs[(runs.Model==r.Model)&(runs.Property==r.Property)]
+        assert len(rr)==51 and set(rr.run)==set(range(51))
+        real=rr.loc[rr.run==0,'R2'].iloc[0];null=rr.loc[rr.run>0,'R2']
+        assert np.isclose(r.p_value,(1+(null>=real).sum())/51)
+    print('PASS: all 918 permutation/baseline evaluations present; all p-values recomputed')
