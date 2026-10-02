@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Nested, identity-grouped QSPR validation. See VALIDATION_README.md.
+Inputs are preserved. Unresolved chemical identities make this a provisional run.
+"""
+import os
+for v in ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS'):
+    os.environ[v] = '1'
+import argparse, hashlib, json, platform, time, warnings
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import scipy, sklearn
+from sklearn.model_selection import KFold, GroupShuffleSplit
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.neural_network import MLPRegressor
+from sklearn.svm import SVR
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.exceptions import ConvergenceWarning
+from joblib import Parallel, delayed
+
+SEED=42
+FEATURES=['Randic','General Randic','M1','M2','GA','AG','AZ','Harmonic','Sombor','Forgotten','ESO','SCI','General SCI']
+PROPERTIES=['LogP','PSA','MW','Rot_Bonds','Polar','tPSA','CLogP','CMR','LogS']
+GRIDS={'ANN':[{'hidden_layer_sizes':a} for a in [(4,),(8,),(8,4)]],
+       'SVR':[{'C':c,'epsilon':e,'gamma':g} for c in [1,10] for e in [.01,.1] for g in ['scale','auto']]}
+
+def dump(path,obj):
+    Path(path).write_text(json.dumps(obj,indent=2,allow_nan=False,default=lambda x:x.item() if isinstance(x,np.generic) else str(x)))
+
+def identity_groups(d):
+    # Union identical CID OR exact SMILES. This is not chemical standardization.
+    parent=list(range(len(d)))
+    def root(i):
+        while parent[i]!=i:
+            parent[i]=parent[parent[i]];i=parent[i]
+        return i
+    for col in ['CID','SMILES']:
+        seen={}
+        for i,val in enumerate(d[col].astype(str)):
+            if val in seen: parent[root(i)]=root(seen[val])
+            else: seen[val]=i
+    return pd.factorize([root(i) for i in range(len(d))])[0]
+
+def load_data(base):
+    ip=base/'100_Drugs_13_Indices.xlsx'; pp=base/'Drug_Properties_filled (1).xlsx'
+    x=pd.read_excel(ip);y=pd.read_excel(pp)
+    d=x.merge(y,on='Drug',how='outer',validate='one_to_one',indicator=True)
+    if not (d['_merge']=='both').all(): raise ValueError('Unmatched drug rows')
+    if d[['CID','SMILES']].isna().any().any(): raise ValueError('Missing identity fields')
+    if not np.isfinite(d[FEATURES+PROPERTIES].to_numpy(float)).all(): raise ValueError('Missing/nonfinite numeric input')
+    groups=identity_groups(d)
+    for g in np.unique(groups):
+        rows=d.loc[groups==g,PROPERTIES].to_numpy(float)
+        if not np.allclose(rows,rows[0]): raise ValueError('Conflicting responses for repeated identity; curate before analysis')
+    audit={'rows':len(d),'identity_groups':int(len(np.unique(groups))),
+      'duplicate_identities':d.loc[d.CID.duplicated(False)|d.SMILES.duplicated(False),['Drug','CID','SMILES']].to_dict('records'),
+      'disconnected_structures':d.loc[d.SMILES.str.contains('.',regex=False),['Drug','CID','SMILES']].to_dict('records'),
+      'Molar_Ref_equals_CMR':bool(np.array_equal(d.Molar_Ref,d.CMR)),
+      'Polar_CMR_ratio_range':[float((d.Polar/d.CMR).min()),float((d.Polar/d.CMR).max())],
+      'status':'PROVISIONAL: identity/chemical-form policy and endpoint provenance require curation',
+      'input_sha256':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in [ip,pp]}}
+    return d,groups,audit
+
+def splits(groups,seed=SEED):
+    unique=np.unique(groups)
+    for train,test in KFold(5,shuffle=True,random_state=seed).split(unique):
+        a=np.flatnonzero(np.isin(groups,unique[train]));b=np.flatnonzero(np.isin(groups,unique[test]))
+        assert not set(groups[a])&set(groups[b])
+        yield a,b
+
+def make_model(family,params):
+    m=(MLPRegressor(solver='lbfgs',activation='relu',alpha=.0001,max_iter=2000,max_fun=15000,
+       tol=.0001,random_state=SEED,**params) if family=='ANN' else SVR(kernel='rbf',**params))
+    return Pipeline([('scaler',StandardScaler()),('model',m)])
+
+def fit(model,X,y):
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter('always',ConvergenceWarning)
+        model.fit(X,y)
+    return sum(issubclass(w.category,ConvergenceWarning) for w in ws)
+
+def select(X,y,g,family):
+    # No outer test information is accepted by this function.
+    folds=list(splits(g)); scores=[]; wc=0
+    for p in GRIDS[family]:
+        pred=np.full(len(y),np.nan)
+        for a,b in folds:
+            m=make_model(family,p);wc+=fit(m,X[a],y[a]);pred[b]=m.predict(X[b])
+        assert np.isfinite(pred).all()
+        scores.append(float(r2_score(y,pred)))
+    k=int(np.argmax(scores)) # deterministic first-candidate tie break
+    return GRIDS[family][k],scores[k],wc
+
+def evaluate_fold(X,y,g,a,b,family):
+    assert not set(g[a])&set(g[b])
+    params,inner,wc=select(X[a],y[a],g[a],family)
+    m=make_model(family,params);wc+=fit(m,X[a],y[a])
+    return m.predict(X[b]),params,inner,wc
+
+def metrics(y,p):
+    return {'R2':float(r2_score(y,p)),'RMSE':float(np.sqrt(mean_squared_error(y,p))), 'MAE':float(mean_absolute_error(y,p))}
+
+def bootstrap(y,p,g,B,seed):
+    # Paired cluster bootstrap of fixed predictions, not residual shuffling.
+    # Approximate conditional intervals, not full training/selection uncertainty.
+    rng=np.random.default_rng(seed);members=[np.flatnonzero(g==v) for v in np.unique(g)];vals=[]
+    for _ in range(B):
+        ii=np.concatenate([members[k] for k in rng.integers(0,len(members),len(members))])
+        if np.var(y[ii])==0: continue
+        vals.append(list(metrics(y[ii],p[ii]).values()))
+    a=np.array(vals); out={'valid_bootstrap_draws':len(vals)}
+    for j,k in enumerate(['R2','RMSE','MAE']): out[k+'_CI_low'],out[k+'_CI_high']=np.quantile(a[:,j],[.025,.975]).tolist()
+    return out
+
+def main_evaluation(d,g,prop,family,train,test,out,B):
+    X=d[FEATURES].to_numpy(float);y=d[prop].to_numpy(float);warning_count=0
+    # HOLD-OUT BRANCH: fit using training only. No full-data tuning result used here.
+    hp,params,inner,wc=evaluate_fold(X,y,g,train,test,family);warning_count+=wc
+    hold={'Property':prop,'Model':family,'Evaluation':'holdout','n_train':len(train),'n_test':len(test),**metrics(y[test],hp),
+          **bootstrap(y[test],hp,g[test],B,SEED+200),'params':params,'inner_selection_R2':inner}
+    # Separate prespecified full-data nested leave-one-identity-out analysis.
+    lp=np.full(len(y),np.nan);folds=[]
+    for k,v in enumerate(np.unique(g)):
+        a=np.flatnonzero(g!=v);b=np.flatnonzero(g==v)
+        p,pr,sc,wc=evaluate_fold(X,y,g,a,b,family);warning_count+=wc;lp[b]=p
+        folds.append({'fold':k,'train_rows':a.tolist(),'test_rows':b.tolist(),'params':pr,'inner_selection_R2':sc})
+    loo={'Property':prop,'Model':family,'Evaluation':'nested_leave_identity_out','n_test':len(y),**metrics(y,lp),**bootstrap(y,lp,g,B,SEED+100)}
+    # Full-data descriptive fit, only after all evaluation settings are fixed.
+    pr,sc,wc=select(X,y,g,family);warning_count+=wc;m=make_model(family,pr);warning_count+=fit(m,X,y)
+    fitted=m.predict(X)
+    final={'Property':prop,'Model':family,'params':pr,'R2_fit':float(r2_score(y,fitted)),
+           'inner_selection_R2':sc,'convergence_warnings':warning_count}
+    if family=='ANN':
+        widths=[13]+list(pr['hidden_layer_sizes'])+[1]
+        final['trainable_parameters']=sum((a+1)*b for a,b in zip(widths[:-1],widths[1:]))
+    prefix=out/(family+'_'+prop)
+    dump(str(prefix)+'_metrics.json',{'holdout':hold,'nested':loo,'final':final})
+    dump(str(prefix)+'_folds.json',folds)
+    pred=d[['Drug','CID']].copy();pred['identity_group']=g;pred['observed']=y;pred['nested_prediction']=lp
+    pred['full_fit_prediction']=fitted;pred['holdout_prediction']=np.nan;pred.loc[test,'holdout_prediction']=hp
+    pred.to_csv(str(prefix)+'_predictions.csv',index=False)
+    print(f'DONE {family} {prop}: nested Q2={loo["R2"]:.4f}; holdout R2={hold["R2"]:.4f}',flush=True)
+    return {'holdout':hold,'nested':loo,'final':final}
+
+def permutation_run(d,g,prop,family,run,out):
+    X=d[FEATURES].to_numpy(float);y=d[prop].to_numpy(float).copy();unique=np.unique(g)
+    if run:
+        # Exchange one response per identity. Repeated aliases remain together.
+        group_y=np.array([y[np.flatnonzero(g==v)[0]] for v in unique])
+        perm=np.random.default_rng(SEED+1000+run).permutation(len(unique))
+        for k,v in enumerate(unique): y[g==v]=group_y[perm[k]]
+    p=np.full(len(y),np.nan);wc=0
+    for a,b in splits(g):
+        pred,_,_,w=evaluate_fold(X,y,g,a,b,family);p[b]=pred;wc+=w
+    record={'Property':prop,'Model':family,'run':run,**metrics(y,p),'convergence_warnings':wc}
+    dump(out/f'{family}_{prop}_perm_{run:03d}.json',record)
+    return record
+
+def main():
+    ap=argparse.ArgumentParser();ap.add_argument('--data-dir',type=Path,default=Path(__file__).parent)
+    ap.add_argument('--out',type=Path,default=Path('validation_results'));ap.add_argument('--jobs',type=int,default=8)
+    ap.add_argument('--permutations',type=int,default=50);ap.add_argument('--bootstrap',type=int,default=2000)
+    ap.add_argument('--allow-provisional',action='store_true');args=ap.parse_args()
+    args.out.mkdir(parents=True,exist_ok=True);d,g,audit=load_data(args.data_dir);dump(args.out/'data_audit.json',audit)
+    if not args.allow_provisional: raise SystemExit('Dataset not chemically curated. Review data_audit.json; --allow-provisional enables explicitly provisional diagnostics.')
+    train,test=next(GroupShuffleSplit(n_splits=1,test_size=.2,random_state=SEED).split(d,groups=g))
+    assert not set(g[train])&set(g[test])
+    assignments=d[['Drug','CID','SMILES']].copy();assignments['identity_group']=g;assignments['split']='train';assignments.loc[test,'split']='test'
+    assignments.to_csv(args.out/'split_assignments.csv',index=False)
+    dump(args.out/'run_manifest.json',{'seed':SEED,'train_rows':len(train),'test_rows':len(test),'train_groups':len(np.unique(g[train])),
+       'test_groups':len(np.unique(g[test])),'permutations':args.permutations,'bootstrap':args.bootstrap,
+       'Python':platform.python_version(),'numpy':np.__version__,'pandas':pd.__version__,'scipy':scipy.__version__,
+       'sklearn':sklearn.__version__,'grid':GRIDS,'status':audit['status'],'input_sha256':audit['input_sha256'],
+       'source_commit':'14b5019a7676db5200b4c9cd0a412c84be138228',
+       'script_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest()})
+    jobs=[(p,m) for p in PROPERTIES for m in ['ANN','SVR']]
+    result=Parallel(n_jobs=args.jobs)(delayed(main_evaluation)(d,g,p,m,train,test,args.out,args.bootstrap) for p,m in jobs)
+    for label in ['holdout','nested','final']:pd.DataFrame([r[label] for r in result]).to_csv(args.out/(label+'_summary.csv'),index=False)
+    print('Starting matched nested five-fold permutation tests',flush=True)
+    null=Parallel(n_jobs=args.jobs,verbose=10)(delayed(permutation_run)(d,g,p,m,r,args.out) for p,m in jobs for r in range(args.permutations+1))
+    nd=pd.DataFrame(null);nd.to_csv(args.out/'permutation_runs.csv',index=False);summary=[]
+    for (p,m),sub in nd.groupby(['Property','Model'],sort=False):
+        real=float(sub.loc[sub.run==0,'R2'].iloc[0]);v=sub.loc[sub.run>0,'R2'].to_numpy()
+        summary.append({'Property':p,'Model':m,'original_nested_5fold_Q2':real,'randomized_Q2_mean':float(v.mean()),
+          'randomized_Q2_sd':float(v.std(ddof=1)),'randomized_Q2_min':float(v.min()),'randomized_Q2_max':float(v.max()),
+          'p_value':float((1+(v>=real).sum())/(len(v)+1)),'n_permutations':len(v)})
+    pd.DataFrame(summary).to_csv(args.out/'permutation_summary.csv',index=False)
+    print('COMPLETE',flush=True)
+if __name__=='__main__':main()
