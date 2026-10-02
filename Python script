@@ -1,0 +1,96 @@
+import networkx as nx
+import math
+import numpy as np
+
+edges_aspirin = [
+    (1,2), (2,3), (2,4), (4,5), (5,6),
+    (6,7), (7,8), (8,9), (9,10), (10,5),
+    (5,11), (11,12), (11,13)
+]
+
+G = nx.Graph()
+G.add_edges_from(edges_aspirin)
+
+deg = dict(G.degree())
+
+# Randi\'{c} Index
+randic = sum(
+    1 / math.sqrt(deg[u]*deg[v])
+    for u,v in G.edges()
+)
+
+# General Randi\'{c} Index (a = -0.319)
+general_randic = sum(
+    (deg[u]*deg[v])**(-0.319)
+    for u,v in G.edges()
+)
+
+# First Zagreb Index
+M1 = sum(
+    deg[u] + deg[v]
+    for u,v in G.edges()
+)
+
+# Second Zagreb Index
+M2 = sum(
+    deg[u]*deg[v]
+    for u,v in G.edges()
+)
+
+# Geometric-Arithmetic Index
+GA = sum(
+    (2*math.sqrt(deg[u]*deg[v])) /
+    (deg[u] + deg[v])
+    for u,v in G.edges()
+)
+
+# Arithmetic-Geometric Index
+AG = sum(
+    (deg[u] + deg[v]) /
+    (2*math.sqrt(deg[u]*deg[v]))
+    for u,v in G.edges()
+)
+
+# Augmented Zagreb Index
+AZ = sum(
+    ((deg[u]*deg[v]) /
+    (deg[u] + deg[v] - 2))**3
+    for u,v in G.edges()
+)
+
+# Harmonic Index
+H = sum(
+    2 / (deg[u] + deg[v])
+    for u,v in G.edges()
+)
+
+# Sombor Index
+SO = sum(
+    math.sqrt(deg[u]**2 + deg[v]**2)
+    for u,v in G.edges()
+)
+
+# Forgotten Index
+F = sum(
+    deg[u]**2 + deg[v]**2
+    for u,v in G.edges()
+)
+
+# Elliptic Sombor Index
+ESO = sum(
+    (deg[u] + deg[v]) *
+    math.sqrt(deg[u]**2 + deg[v]**2)
+    for u,v in G.edges()
+)
+
+# Sum Connectivity Index
+SCI = sum(
+    1 / math.sqrt(deg[u] + deg[v])
+    for u,v in G.edges()
+)
+
+# General Sum-Connectivity Index (a = -0.553)
+General_SCI = sum(
+    (deg[u] + deg[v])**(-0.553)
+    for u,v in G.edges()
+)
