@@ -1,0 +1,42 @@
+from pathlib import Path
+import json
+import numpy as np
+import pandas as pd
+
+import validate_qspr as v
+
+out = Path(__file__).parent / "validation_results"
+rows = []
+for prop in v.PROPERTIES:
+    for model in ["ANN", "SVR"]:
+        records = [
+            json.loads((out / f"{model}_{prop}_perm_{run:03d}.json").read_text())
+            for run in range(51)
+        ]
+        real = float(next(r["R2"] for r in records if r["run"] == 0))
+        null = np.array([r["R2"] for r in records if r["run"] > 0], dtype=float)
+        rows.append({
+            "Property": prop,
+            "Model": model,
+            "original_nested_5fold_Q2": real,
+            "randomized_Q2_mean": float(null.mean()),
+            "randomized_Q2_sd": float(null.std(ddof=1)),
+            "randomized_Q2_min": float(null.min()),
+            "randomized_Q2_max": float(null.max()),
+            "p_value": float((1 + np.sum(null >= real)) / 51),
+            "n_permutations": 50,
+        })
+
+summary = pd.DataFrame(rows)
+summary.to_csv(out / "permutation_summary.csv", index=False)
+frames = []
+for prop in v.PROPERTIES:
+    for model in ["ANN", "SVR"]:
+        frames.append(pd.DataFrame([
+            json.loads(p.read_text())
+            for p in sorted(out.glob(f"{model}_{prop}_perm_*.json"))
+        ]))
+runs = pd.concat(frames, ignore_index=True)
+runs.to_csv(out / "permutation_runs.csv", index=False)
+print(summary.to_string(index=False))
+print(f"Saved {len(runs)} runs and {len(summary)} summaries")
