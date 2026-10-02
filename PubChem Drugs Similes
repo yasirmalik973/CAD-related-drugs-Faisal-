@@ -1,0 +1,489 @@
+# ============================================================
+# PUBCHEM DRUG SMILES + PROPERTIES EXTRACTOR
+# Google Colab
+# ============================================================
+
+# ------------------------------------------------------------
+# 1. Install required packages
+# ------------------------------------------------------------
+
+!pip -q install requests openpyxl pandas
+
+
+# ------------------------------------------------------------
+# 2. Import libraries
+# ------------------------------------------------------------
+
+import pandas as pd
+import requests
+import time
+import re
+from urllib.parse import quote
+from google.colab import files
+
+
+# ------------------------------------------------------------
+# 3. Upload Excel file
+# ------------------------------------------------------------
+
+print("Please upload your Excel file containing the drug names.")
+
+uploaded = files.upload()
+
+input_file = list(uploaded.keys())[0]
+
+print("\nUploaded file:")
+print(input_file)
+
+
+# ------------------------------------------------------------
+# 4. Read Excel file
+# ------------------------------------------------------------
+
+df = pd.read_excel(input_file)
+
+print("\nColumns found in your Excel file:")
+print(df.columns.tolist())
+
+print("\nFirst 5 rows:")
+display(df.head())
+
+
+# ------------------------------------------------------------
+# 5. Automatically find the drug-name column
+# ------------------------------------------------------------
+
+possible_name_columns = [
+    "Drug_Name",
+    "Drug Name",
+    "DrugName",
+    "Name",
+    "Generic_Name",
+    "Generic Name",
+    "Compound",
+    "Compound_Name",
+    "Compound Name",
+    "Molecule",
+    "Molecule_Name"
+]
+
+drug_column = None
+
+# First try exact column names
+for col in possible_name_columns:
+    if col in df.columns:
+        drug_column = col
+        break
+
+# If no exact match, look for columns containing name/drug/compound
+if drug_column is None:
+
+    for col in df.columns:
+        col_lower = str(col).lower()
+
+        if (
+            "drug" in col_lower
+            or "compound" in col_lower
+            or "molecule" in col_lower
+            or "generic" in col_lower
+        ):
+            drug_column = col
+            break
+
+# If still not found, ask the user to select a column
+if drug_column is None:
+
+    print("\nCould not automatically identify the drug-name column.")
+    print("Available columns:")
+
+    for i, col in enumerate(df.columns):
+        print(f"{i}: {col}")
+
+    column_number = int(
+        input("\nEnter the number of the column containing drug names: ")
+    )
+
+    drug_column = df.columns[column_number]
+
+
+print("\nDrug-name column selected:")
+print(drug_column)
+
+
+# ------------------------------------------------------------
+# 6. PubChem function
+# ------------------------------------------------------------
+
+def get_pubchem_data(drug_name, max_retries=3):
+
+    # Return empty result for blank values
+    if pd.isna(drug_name):
+        return {
+            "PubChem_CID": None,
+            "Canonical_SMILES": None,
+            "Isomeric_SMILES": None,
+            "Molecular_Weight": None,
+            "Exact_Molecular_Weight": None,
+            "CLogP": None,
+            "TPSA": None,
+            "CMR": None,
+            "LogP": None,
+            "Rotatable_Bonds": None,
+            "PubChem_Status": "Blank drug name"
+        }
+
+    drug_name = str(drug_name).strip()
+
+    if drug_name == "":
+        return {
+            "PubChem_CID": None,
+            "Canonical_SMILES": None,
+            "Isomeric_SMILES": None,
+            "Molecular_Weight": None,
+            "Exact_Molecular_Weight": None,
+            "CLogP": None,
+            "TPSA": None,
+            "CMR": None,
+            "LogP": None,
+            "Rotatable_Bonds": None,
+            "PubChem_Status": "Blank drug name"
+        }
+
+    # URL encode drug name
+    encoded_name = quote(drug_name)
+
+    # --------------------------------------------------------
+    # Step A: Find PubChem CID
+    # --------------------------------------------------------
+
+    cid_url = (
+        f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/"
+        f"compound/name/{encoded_name}/cids/JSON"
+    )
+
+    cid_data = None
+
+    for attempt in range(max_retries):
+
+        try:
+
+            response = requests.get(
+                cid_url,
+                timeout=20
+            )
+
+            if response.status_code == 200:
+
+                cid_data = response.json()
+                break
+
+            elif response.status_code == 404:
+
+                return {
+                    "PubChem_CID": None,
+                    "Canonical_SMILES": None,
+                    "Isomeric_SMILES": None,
+                    "Molecular_Weight": None,
+                    "Exact_Molecular_Weight": None,
+                    "CLogP": None,
+                    "TPSA": None,
+                    "CMR": None,
+                    "LogP": None,
+                    "Rotatable_Bonds": None,
+                    "PubChem_Status": "Not found"
+                }
+
+        except Exception as e:
+
+            if attempt == max_retries - 1:
+
+                return {
+                    "PubChem_CID": None,
+                    "Canonical_SMILES": None,
+                    "Isomeric_SMILES": None,
+                    "Molecular_Weight": None,
+                    "Exact_Molecular_Weight": None,
+                    "CLogP": None,
+                    "TPSA": None,
+                    "CMR": None,
+                    "LogP": None,
+                    "Rotatable_Bonds": None,
+                    "PubChem_Status": f"CID error: {str(e)}"
+                }
+
+            time.sleep(2)
+
+    # --------------------------------------------------------
+    # Extract CID
+    # --------------------------------------------------------
+
+    try:
+
+        cids = cid_data["IdentifierList"]["CID"]
+
+        if len(cids) == 0:
+
+            return {
+                "PubChem_CID": None,
+                "Canonical_SMILES": None,
+                "Isomeric_SMILES": None,
+                "Molecular_Weight": None,
+                "Exact_Molecular_Weight": None,
+                "CLogP": None,
+                "TPSA": None,
+                "CMR": None,
+                "LogP": None,
+                "Rotatable_Bonds": None,
+                "PubChem_Status": "No CID"
+            }
+
+        cid = cids[0]
+
+    except Exception:
+
+        return {
+            "PubChem_CID": None,
+            "Canonical_SMILES": None,
+            "Isomeric_SMILES": None,
+            "Molecular_Weight": None,
+            "Exact_Molecular_Weight": None,
+            "CLogP": None,
+            "TPSA": None,
+            "CMR": None,
+            "LogP": None,
+            "Rotatable_Bonds": None,
+            "PubChem_Status": "CID parsing error"
+        }
+
+
+    # --------------------------------------------------------
+    # Step B: Get PubChem properties
+    # --------------------------------------------------------
+
+    properties = [
+        "MolecularFormula",
+        "MolecularWeight",
+        "CanonicalSMILES",
+        "IsomericSMILES",
+        "CLogP",
+        "ExactMass",
+        "TPSA",
+        "HBondDonorCount",
+        "HBondAcceptorCount",
+        "RotatableBondCount"
+    ]
+
+    property_string = ",".join(properties)
+
+    property_url = (
+        f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/"
+        f"compound/cid/{cid}/property/{property_string}/JSON"
+    )
+
+    prop_data = None
+
+    for attempt in range(max_retries):
+
+        try:
+
+            response = requests.get(
+                property_url,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+
+                prop_data = response.json()
+                break
+
+        except Exception as e:
+
+            if attempt == max_retries - 1:
+
+                return {
+                    "PubChem_CID": cid,
+                    "Canonical_SMILES": None,
+                    "Isomeric_SMILES": None,
+                    "Molecular_Weight": None,
+                    "Exact_Molecular_Weight": None,
+                    "CLogP": None,
+                    "TPSA": None,
+                    "CMR": None,
+                    "LOGP": None,
+                    "Rotatable_Bonds": None,
+                    "PubChem_Status": f"Property error: {str(e)}"
+                }
+
+            time.sleep(2)
+
+
+    # --------------------------------------------------------
+    # Extract properties
+    # --------------------------------------------------------
+
+    try:
+
+        props = prop_data["PropertyTable"]["Properties"][0]
+
+        result = {
+
+            "PubChem_CID": cid,
+
+            "Canonical_SMILES":
+                props.get("ConnectivitySMILES", None),
+
+            "Isomeric_SMILES":
+                props.get("SMILES", None),
+
+            "Molecular_Weight":
+                props.get("MolecularWeight", None),
+
+            "Exact_Molecular_Weight":
+                props.get("ExactMass", None),
+
+            "CLogP":
+                props.get("CLogP", None),
+
+            "TPSA":
+                props.get("TPSA", None),
+
+            "CMR":
+                props.get("HBondAcceptorCount", None),
+
+            "LOGP":
+                props.get("HBondDonorCount", None),
+
+            "Rotatable_Bonds":
+                props.get("RotatableBondCount", None),
+
+            "PubChem_Status":
+                "Success"
+        }
+
+        return result
+
+    except Exception as e:
+
+        return {
+
+            "PubChem_CID": cid,
+
+            "Canonical_SMILES": None,
+
+            "Isomeric_SMILES": None,
+
+            "Molecular_Weight": None,
+
+            "Exact_Molecular_Weight": None,
+
+            "CLogP": None,
+
+            "TPSA": None,
+
+            "CMR": None,
+
+            "LOGP": None,
+
+            "Rotatable_Bonds": None,
+
+            "PubChem_Status":
+                f"Property parsing error: {str(e)}"
+        }
+
+
+# ------------------------------------------------------------
+# 7. Process all drugs
+# ------------------------------------------------------------
+
+print("\n====================================================")
+print("Starting PubChem extraction...")
+print("====================================================\n")
+
+results = []
+
+total_drugs = len(df)
+
+for i, drug in enumerate(df[drug_column], start=1):
+
+    print(
+        f"[{i}/{total_drugs}] Searching PubChem: {drug}"
+    )
+
+    result = get_pubchem_data(drug)
+
+    results.append(result)
+
+    # Small delay to avoid sending requests too quickly
+    time.sleep(0.2)
+
+
+# ------------------------------------------------------------
+# 8. Convert results into DataFrame
+# ------------------------------------------------------------
+
+results_df = pd.DataFrame(results)
+
+
+# ------------------------------------------------------------
+# 9. Combine original Excel data + PubChem data
+# ------------------------------------------------------------
+
+final_df = pd.concat(
+    [
+        df.reset_index(drop=True),
+        results_df.reset_index(drop=True)
+    ],
+    axis=1
+)
+
+
+# ------------------------------------------------------------
+# 10. Display result
+# ------------------------------------------------------------
+
+print("\n====================================================")
+print("Extraction completed!")
+print("====================================================\n")
+
+display(final_df.head(10))
+
+
+# ------------------------------------------------------------
+# 11. Show extraction statistics
+# ------------------------------------------------------------
+
+success_count = (
+    final_df["PubChem_Status"] == "Success"
+).sum()
+
+not_found_count = (
+    final_df["PubChem_Status"] == "Not found"
+).sum()
+
+print("Total drugs:", total_drugs)
+print("Successfully extracted:", success_count)
+print("Not found:", not_found_count)
+
+
+# ------------------------------------------------------------
+# 12. Save to Excel
+# ------------------------------------------------------------
+
+output_file = "PubChem_Drug_Properties.xlsx"
+
+final_df.to_excel(
+    output_file,
+    index=False
+)
+
+print("\nOutput file created:")
+print(output_file)
+
+
+# ------------------------------------------------------------
+# 13. Download Excel automatically
+# ------------------------------------------------------------
+
+files.download(output_file)
+
+print("\nDone!")
