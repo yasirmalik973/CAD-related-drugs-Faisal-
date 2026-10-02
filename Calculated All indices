@@ -1,0 +1,202 @@
+# =====================================
+# Calculate indices for ALL drugs
+# =====================================
+
+results = []
+
+for _, row in df.iterrows():
+
+    drug = row["Drug"]
+    cid = row["CID"]
+    smiles = row["SMILES"]
+
+    values = calculate_indices(smiles)
+
+    if values is None:
+        print(f"Invalid SMILES: {drug}")
+        continue
+
+    values["Drug"] = drug
+    values["CID"] = cid
+    values["SMILES"] = smiles
+
+    results.append(values)
+
+# Convert to DataFrame
+result_df = pd.DataFrame(results)
+
+# Arrange Columns
+result_df = result_df[
+    [
+        "Drug",
+        "CID",
+        "SMILES",
+        "Randic",
+        "General Randic",
+        "M1",
+        "M2",
+        "GA",
+        "AG",
+        "AZ",
+        "Harmonic",
+        "Sombor",
+        "Forgotten",
+        "ESO",
+        "SCI",
+        "General SCI"
+    ]
+]
+
+# Save Excel
+result_df.to_excel("100_Drugs_13_Indices.xlsx", index=False)
+
+print("Done...")
+
+from google.colab import files
+files.download("100_Drugs_13_Indices.xlsx")
+
+
+
+
+For properties :
+from google.colab import files
+uploaded = files.upload()
+
+2 columns claude sa find ki bqi is code sa
+import pandas as pd
+import pubchempy as pcp
+from rdkit import Chem
+from rdkit.Chem import Descriptors, Crippen, rdMolDescriptors
+
+# Excel file
+input_file = "100_Drugs_13_Indices.xlsx"
+
+# Read file
+df = pd.read_excel(input_file)
+
+# SMILES column name
+smiles_col = "SMILES"
+
+results = []
+
+for i, row in df.iterrows():
+    drug = row["Drug"]
+    smiles = row[smiles_col]
+
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+
+        # RDKit Properties
+        MW = Descriptors.MolWt(mol)
+        LogP = Crippen.MolLogP(mol)
+        tPSA = rdMolDescriptors.CalcTPSA(mol)
+        Rot_Bonds = rdMolDescriptors.CalcNumRotatableBonds(mol)
+        CMR = Crippen.MolMR(mol)
+
+        # PubChem Properties
+        compounds = pcp.get_compounds(smiles, 'smiles')
+
+        PSA = None
+        Polar = None
+        Molar_Ref = None
+        CLogP = None
+        LogS = None
+
+        if compounds:
+            c = compounds[0]
+
+            PSA = getattr(c, "tpsa", None)
+            CLogP = getattr(c, "xlogp", None)
+
+        results.append({
+            "Drug": drug,
+            "LogP": LogP,
+            "PSA": PSA,
+            "MW": MW,
+            "Molar_Ref": CMR,
+            "Rot_Bonds": Rot_Bonds,
+            "Polar": Polar,
+            "tPSA": tPSA,
+            "CLogP": CLogP,
+            "CMR": CMR,
+            "LogS": LogS
+        })
+
+    except Exception as e:
+        print(drug, e)
+
+output = pd.DataFrame(results)
+
+output.to_excel("Drug_Properties.xlsx", index=False)
+
+print("Done! File saved as Drug_Properties.xlsx")
+
+
+
+
+Predicted values  calculation:
+
+import pandas as pd
+from google.colab import files
+
+# ==========================
+# Upload Indices File
+# ==========================
+print("Upload your 13 Indices Excel file")
+uploaded = files.upload()
+
+filename = list(uploaded.keys())[0]
+df = pd.read_excel(filename)
+
+print("Loaded File:", filename)
+
+# ==========================
+# Drug Name Column
+# ==========================
+drug_col = df.columns[0]
+
+# Numeric columns only
+indices = df.columns[1:]
+
+# Convert to numeric
+for col in indices:
+    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+# ==========================
+# Formulas
+# ==========================
+formulas = {
+    "tPSA": (66.614, 0.444),
+    "CLogP": (-3.650, 0.266),
+    "CMR": (0.759, 0.344),
+    "LogS": (0.400, -0.346),
+    "LogP": (-0.775, 0.280),
+    "PSA": (51.170, 0.117),
+    "MW": (15.919, 28.609),
+    "Molar_Ref": (8.979, 7.152),
+    "Rot_Bonds": (-1.098, 0.676),
+    "Polar": (-96.800, 1.789)
+}
+
+# ==========================
+# Calculate
+# ==========================
+result = pd.DataFrame()
+result[drug_col] = df[drug_col]
+
+for idx in indices:
+    for prop, (a, b) in formulas.items():
+        result[f"{prop}_{idx}"] = a + b * df[idx]
+
+# ==========================
+# Save Excel
+# ==========================
+output = "Predicted_10_Properties.xlsx"
+result.to_excel(output, index=False)
+
+print("Done!")
+print("Output File:", output)
+
+# Auto Download
+files.download(output)
+
