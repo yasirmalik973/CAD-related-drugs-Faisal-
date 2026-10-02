@@ -1,0 +1,23 @@
+from pathlib import Path
+import re
+from joblib import Parallel, delayed
+import validate_qspr as v
+
+base = Path(__file__).parent
+out = base / "validation_results"
+data, groups, _ = v.load_data(base)
+
+jobs = []
+for prop in v.PROPERTIES:
+    for model in ["ANN", "SVR"]:
+        for run in range(v.SEED * 0 + 51):
+            expected = out / f"{model}_{prop}_perm_{run:03d}.json"
+            if not expected.exists():
+                jobs.append((prop, model, run))
+
+print(f"Resuming {len(jobs)} missing permutation runs", flush=True)
+Parallel(n_jobs=8, verbose=10)(
+    delayed(v.permutation_run)(data, groups, prop, model, run, out)
+    for prop, model, run in jobs
+)
+print("Resume complete", flush=True)
